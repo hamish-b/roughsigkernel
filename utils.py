@@ -3,6 +3,7 @@ import jax.numpy as jnp
 import roughpy_jax as rpj
 from roughpy_jax.intervals import IntervalType, Partition
 from roughpy_jax.algebra import to_signature,to_log_signature, lie_to_tensor, as_free_tensor, _remove_unit_term
+from roughpy_jax.streams import LieIncrementStream
 from jax import random
 
 #----------------------------------------------------------------------------
@@ -89,21 +90,6 @@ def trunc(X_LSP, old_depth, new_depth):
     return tuple(x.change_depth(new_depth).change_depth(old_depth) for x in X_LSP)
 
 
-# replaces the first element in each signature with a zero instead of a one
-# REPLACED WITH _remove_unit_term() from roughpy_jax.algebra
-
-def one_to_zero(X_SP, tensor_basis):
-
-    X_sub = []
-    
-    for x in X_SP:
-        x = jnp.array(x.__array__())
-        x.at[0].set(0)
-        x = rpj.FreeTensor(x, tensor_basis)
-        X_sub.append(x)
-        
-    return X_sub
-
 # helper function which changes the batch size of each tensor in the input so that there are
 # len(pairs[:, order]) elements in each batch (in this case representing the the first or second 
 # elements out of the B*(B+1)/2 pairs) 
@@ -139,4 +125,29 @@ def make_incremental(times, data):
     data_inc = jnp.diff(data, axis=1) # -2
 
     return times_del, data_inc
+
+def make_Lie(data, times, n, R):
+
+    W = len(data[0][0])
+    Lie_Basis = rpj.LieBasis(depth = n, width = W)
+    Tensor_Basis = rpj.to_tensor_basis(Lie_Basis)
+    data_Lie = LieIncrementStream.from_increments(
+            timestamps=times,
+            data=data,
+            input_data_basis=None,
+            resolution=R,
+            lie_basis=Lie_Basis
+        )
+    return data_Lie, Tensor_Basis
     
+def eval_adj(phi, psi, x, y):
+
+    r_x_y = rpj.ft_adjoint_right_mul(x, y)  
+    r_y_x = rpj.ft_adjoint_right_mul(y, x)
+
+    return rpj.tensor_pairing(phi, r_x_y) + rpj.tensor_pairing(psi, r_y_x)
+
+def add_tensor_scalar(a, s): # since multiplicative identity in T^n(V) is (1, 0, 0, 0,...)
+    result = a.__array__().copy()
+    result[0, 0] += s[0]
+    return rpj.FreeTensor(result, a.basis)

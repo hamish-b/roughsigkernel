@@ -8,37 +8,8 @@ from roughpy_jax.intervals import IntervalType, Partition
 from roughpy_jax.streams.piecewise_abelian_stream import to_piecewise_abelian_stream
 from roughpy_jax.algebra import to_signature, antipode, to_log_signature, lie_to_tensor, as_free_tensor, _remove_unit_term
 from roughpy_jax.dense_algebra import get_batch_shape, _algebra_scalar_multiply, broadcast_to_batch_shape
-from utils import ft_pairs, sigs_over_intervals, upper_tri_to_symmetric
-
-#--------------------------------------------------------------------------------
-# Some functions which improve simplicity of code
-#--------------------------------------------------------------------------------
-
-def make_Lie(data, times, n, R):
-
-    W = len(data[0][0])
-    Lie_Basis = rpj.LieBasis(depth = n, width = W)
-    Tensor_Basis = rpj.to_tensor_basis(Lie_Basis)
-    data_Lie = LieIncrementStream.from_increments(
-            timestamps=times,
-            data=data,
-            input_data_basis=None,
-            resolution=R,
-            lie_basis=Lie_Basis
-        )
-    return data_Lie, Tensor_Basis
-    
-def eval_adj(phi, psi, x, y):
-
-    r_x_y = rpj.ft_adjoint_right_mul(x, y)  
-    r_y_x = rpj.ft_adjoint_right_mul(y, x)
-
-    return rpj.tensor_pairing(phi, r_x_y) + rpj.tensor_pairing(psi, r_y_x)
-
-def add_tensor_scalar(a, s): # since multiplicative identity in T^n(V) is (1, 0, 0, 0,...)
-    result = a.__array__().copy()
-    result[0, 0] += s[0]
-    return rpj.FreeTensor(result, a.basis)
+from utils import ft_pairs, sigs_over_intervals, upper_tri_to_symmetric, eval_adj, add_tensor_scalar, make_Lie
+from functools import partial
 
 #--------------------------------------------------------------------------------------
 # function which sets up the initial conditions of the PDE
@@ -75,19 +46,13 @@ def initialise_PDE(X_SPTs_zero, Y_SPTs_zero, tensor_basis):
     K = K.at[:, 0, :].set(1)
 
     zero_tensor = rpj.FreeTensor.zero(basis=tensor_basis, batch_dims=(M,))
-    phi = [[zero_tensor]*(L+1)]*(L+1)  
-    psi = [[zero_tensor]*(L+1)]*(L+1)
-    phi = jnp.asarray(phi)
-    psi = jnp.asarray(psi)
+    phi = [[zero_tensor for _ in range(L+1)] for _ in range(L+1)]
+    psi = [[zero_tensor for _ in range(L+1)] for _ in range(L+1)]
 
-    # there is some sort of bug that requires phi to be jnp array instead of a list of lists of tensors
-    # the tensor version does not correctly update
     for i in range(1, L+1):
-        phi = phi.at[i, 0].set(X_SPTs_zero[i-1].__array__()) 
-
+        phi[i][0] = X_SPTs_zero[i-1]
     for j in range(1, L+1):
-        psi = psi.at[0, j].set(Y_SPTs_zero[j-1].__array__()) 
-
+        psi[0][j] = Y_SPTs_zero[j-1]
     return phi, psi, K
 
 #---------------------------------------------------------------------------------
@@ -109,7 +74,7 @@ def compute_psi(yj, ytj, phi10, psi10, K00):
                                 - rpj.tensor_pairing(phi10, ytj))
     return psi11
 
-def compute_K(xi, yj, phi00, phi01, phi10, phi11, psi00, psi01, psi10, psi11, K00, K01, K10, tensor_basis):
+def compute_K(xi, yj, phi00, phi01, phi10, phi11, psi00, psi01, psi10, psi11, K00, K01, K10):
 
     eval_adj_ = eval_adj(phi00, psi00, xi, yj)
     next_eval_adj = eval_adj(phi11, psi11, xi, yj) # maybe these can be done with built in rpj methods
@@ -127,7 +92,7 @@ def compute_K(xi, yj, phi00, phi01, phi10, phi11, psi00, psi01, psi10, psi11, K0
     K11 = K10 + K01 - K00 + (1./4)*(f_1 + f_2 + f_3 + f_p)
     return K11
 
-def partition_compute(phi, psi, K, L, xlsps, ylsps, xlspts, ylspts, tensor_basis):
+def partition_compute(phi, psi, K, L, xlsps, ylsps, xlspts, ylspts):
 
     for i in range(L):
         for j in range(L):
@@ -135,22 +100,21 @@ def partition_compute(phi, psi, K, L, xlsps, ylsps, xlspts, ylspts, tensor_basis
             yj = ylsps[j]
             xti = xlspts[i]
             ytj = ylspts[j]
-            phi00, phi01, phi10 = rpj.FreeTensor(phi[i][j], tensor_basis), rpj.FreeTensor(phi[i][j+1], tensor_basis), rpj.FreeTensor(phi[i+1][j], tensor_basis)
-            psi00, psi01, psi10 = rpj.FreeTensor(psi[i][j], tensor_basis), rpj.FreeTensor(psi[i][j+1], tensor_basis), rpj.FreeTensor(psi[i+1][j], tensor_basis)
+            phi00, phi01, phi10 = phi[i][j], phi[i][j+1], phi[i+1][j]
+            psi00, psi01, psi10 = psi[i][j], psi[i][j+1], psi[i+1][j]
             K00, K01, K10 = K[i][j], K[i][j+1], K[i+1][j]
-            phi11 = compute_phi(xi, xti, phi01, psi01, K00).__array__()
-            psi11 = compute_psi(yj, ytj, phi10, psi10, K00).__array__()
-            phi = phi.at[i+1, j+1].set(phi11)
-            psi = psi.at[i+1, j+1].set(psi11)
-            K11 = compute_K(xi, yj, phi00, phi01, phi10, rpj.FreeTensor(phi11, tensor_basis), psi00, psi01, psi10, rpj.FreeTensor(psi11, tensor_basis), K00, K01, K10, tensor_basis)
+            phi11 = compute_phi(xi, xti, phi01, psi01, K00)
+            psi11 = compute_psi(yj, ytj, phi10, psi10, K00)
+            phi[i+1][j+1] = phi11
+            psi[i+1][j+1] = psi11
+            K11 = compute_K(xi, yj, phi00, phi01, phi10, phi11, psi00, psi01, psi10, psi11, K00, K01, K10)
             K = K.at[i+1, j+1].set(K11)
-
     return K    
 #-------------------------------------------------------------------------
 # combines previous functions to solve the PDE and return the kernel matrix
 #-------------------------------------------------------------------------
 
-def solve_PDE(data, times, intervals, n, R, *, testing=False):
+def solve_PDE(data, times, intervals, n, R):
 
     B = len(data)
     L = len(intervals)
@@ -178,7 +142,6 @@ def solve_PDE(data, times, intervals, n, R, *, testing=False):
                           xlsps=xlsps,
                           ylsps=ylsps,
                           xlspts=xlspts,
-                          ylspts=ylspts,
-                          tensor_basis=Tensor_Basis
+                          ylspts=ylspts
     )
     return K
