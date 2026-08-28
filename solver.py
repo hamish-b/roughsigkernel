@@ -13,30 +13,25 @@ from utils import ft_pairs, sigs_over_intervals, upper_tri_to_symmetric
 #--------------------------------------------------------------------------------
 # Some functions which improve simplicity of code
 #--------------------------------------------------------------------------------
-def inner_prod(X,Y): 
-    return jnp.sum(X*Y)  
 
-def batched_inner(X, Y):
-    return jax.jit(jax.vmap(inner_prod, in_axes=(0, 0)))(X.__array__(), Y.__array__())
+def make_Lie(data, times, n, R):
 
-def right_adj(A,C, tensor_basis):
-
-    ant_A = antipode(A) # check whether antipode applies element wise in a batch
-    ant_C = antipode(C)
+    W = len(data[0][0])
+    Lie_Basis = rpj.LieBasis(depth = n, width = W)
+    Tensor_Basis = rpj.to_tensor_basis(Lie_Basis)
+    data_Lie = LieIncrementStream.from_increments(
+            timestamps=times,
+            data=data,
+            input_data_basis=None,
+            resolution=R,
+            lie_basis=Lie_Basis
+        )
+    return data_Lie, Tensor_Basis
     
-    left_adj = rpj.ft_adjoint_left_mul(ant_A, ant_C)
+def eval_adj(phi, psi, x, y):
 
-    left_adj = rpj.FreeTensor(left_adj, basis=tensor_basis)  
-    
-    adj_A_C = antipode(left_adj)
-    
-    return adj_A_C
-
-    
-def eval_adj(phi, psi, x, y, tensor_basis):
-
-    r_x_y = right_adj(x, y, tensor_basis)  
-    r_y_x = right_adj(y, x, tensor_basis)
+    r_x_y = rpj.ft_adjoint_right_mul(x, y)  
+    r_y_x = rpj.ft_adjoint_right_mul(y, x)
 
     return rpj.tensor_pairing(phi, r_x_y) + rpj.tensor_pairing(psi, r_y_x)
 
@@ -82,13 +77,16 @@ def initialise_PDE(X_SPTs_zero, Y_SPTs_zero, tensor_basis):
     zero_tensor = rpj.FreeTensor.zero(basis=tensor_basis, batch_dims=(M,))
     phi = [[zero_tensor]*(L+1)]*(L+1)  
     psi = [[zero_tensor]*(L+1)]*(L+1)
+    phi = jnp.asarray(phi)
+    psi = jnp.asarray(psi)
 
-    # add comment here on what this does later
-
+    # there is some sort of bug that requires phi to be jnp array instead of a list of lists of tensors
+    # the tensor version does not correctly update
     for i in range(1, L+1):
-        phi[i][0] = X_SPTs_zero[i-1]
+        phi = phi.at[i, 0].set(X_SPTs_zero[i-1].__array__()) 
+
     for j in range(1, L+1):
-        psi[0][j] = Y_SPTs_zero[j-1]
+        psi = psi.at[0, j].set(Y_SPTs_zero[j-1].__array__()) 
 
     return phi, psi, K
 
@@ -113,10 +111,10 @@ def compute_psi(yj, ytj, phi10, psi10, K00):
 
 def compute_K(xi, yj, phi00, phi01, phi10, phi11, psi00, psi01, psi10, psi11, K00, K01, K10, tensor_basis):
 
-    eval_adj_ = eval_adj(phi00, psi00, xi, yj, tensor_basis)
-    next_eval_adj = eval_adj(phi11, psi11, xi, yj, tensor_basis) # maybe these can be done with built in rpj methods
-    temp_2 =  eval_adj(phi01, psi01, xi, yj, tensor_basis)
-    temp_3 = eval_adj(phi10, psi10, xi, yj, tensor_basis)
+    eval_adj_ = eval_adj(phi00, psi00, xi, yj)
+    next_eval_adj = eval_adj(phi11, psi11, xi, yj) # maybe these can be done with built in rpj methods
+    temp_2 =  eval_adj(phi01, psi01, xi, yj)
+    temp_3 = eval_adj(phi10, psi10, xi, yj)
 
     G = rpj.tensor_pairing(xi, yj)
     f_1 = K00 * G + eval_adj_
@@ -137,34 +135,20 @@ def partition_compute(phi, psi, K, L, xlsps, ylsps, xlspts, ylspts, tensor_basis
             yj = ylsps[j]
             xti = xlspts[i]
             ytj = ylspts[j]
-            phi00, phi01, phi10 = phi[i][j], phi[i][j+1], phi[i+1][j]
-            psi00, psi01, psi10 = psi[i][j], psi[i][j+1], psi[i+1][j]
+            phi00, phi01, phi10 = rpj.FreeTensor(phi[i][j], tensor_basis), rpj.FreeTensor(phi[i][j+1], tensor_basis), rpj.FreeTensor(phi[i+1][j], tensor_basis)
+            psi00, psi01, psi10 = rpj.FreeTensor(psi[i][j], tensor_basis), rpj.FreeTensor(psi[i][j+1], tensor_basis), rpj.FreeTensor(psi[i+1][j], tensor_basis)
             K00, K01, K10 = K[i][j], K[i][j+1], K[i+1][j]
-            phi11 = compute_phi(xi, xti, phi01, psi01, K00)
-            psi11 = compute_psi(yj, ytj, phi10, psi10, K00)
-            K11 = compute_K(xi, yj, phi00, phi01, phi10, phi11, psi00, psi01, psi10, psi11, K00, K01, K10, tensor_basis)
-            phi[i+1][j+1] = phi11
-            psi[i+1][j+1] = psi11
-            K = K.at[i+1, j+1].set(K11) 
+            phi11 = compute_phi(xi, xti, phi01, psi01, K00).__array__()
+            psi11 = compute_psi(yj, ytj, phi10, psi10, K00).__array__()
+            phi = phi.at[i+1, j+1].set(phi11)
+            psi = psi.at[i+1, j+1].set(psi11)
+            K11 = compute_K(xi, yj, phi00, phi01, phi10, rpj.FreeTensor(phi11, tensor_basis), psi00, psi01, psi10, rpj.FreeTensor(psi11, tensor_basis), K00, K01, K10, tensor_basis)
+            K = K.at[i+1, j+1].set(K11)
 
     return K    
 #-------------------------------------------------------------------------
 # combines previous functions to solve the PDE and return the kernel matrix
 #-------------------------------------------------------------------------
-
-def make_Lie(data, times, n, R):
-
-    W = len(data[0][0])
-    Lie_Basis = rpj.LieBasis(depth = n, width = W)
-    Tensor_Basis = rpj.to_tensor_basis(Lie_Basis)
-    data_Lie = LieIncrementStream.from_increments(
-            timestamps=times,
-            data=data,
-            input_data_basis=None,
-            resolution=R,
-            lie_basis=Lie_Basis
-        )
-    return data_Lie, Tensor_Basis
 
 def solve_PDE(data, times, intervals, n, R, *, testing=False):
 
