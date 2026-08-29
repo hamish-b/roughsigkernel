@@ -1,147 +1,186 @@
 import jax.numpy as jnp
 import roughpy_jax as rpj
-import numpy as np
 import jax
 from roughpy_jax.streams import LieIncrementStream
-from roughpy_jax.streams.lie_increment_stream import _zero_lie
-from roughpy_jax.intervals import IntervalType, Partition
-from roughpy_jax.streams.piecewise_abelian_stream import to_piecewise_abelian_stream
-from roughpy_jax.algebra import to_signature, antipode, to_log_signature, lie_to_tensor, as_free_tensor, _remove_unit_term
-from roughpy_jax.dense_algebra import get_batch_shape, _algebra_scalar_multiply, broadcast_to_batch_shape
-from utils import ft_pairs, sigs_over_intervals, upper_tri_to_symmetric, eval_adj, add_tensor_scalar, make_Lie
+from roughpy_jax.algebra import  as_free_tensor
 from functools import partial
+from utils import (ft_pairs, 
+                   sigs_over_intervals, 
+                   upper_tri_to_symmetric, 
+                   eval_adj, 
+                   add_tensor_scalar)
 
-#--------------------------------------------------------------------------------------
-# function which sets up the initial conditions of the PDE
-#--------------------------------------------------------------------------------------
 
-def initialise_PDE(X_SPTs_zero, Y_SPTs_zero, tensor_basis):
-    '''
-    Inputs:
-    X_SPTs_zero - a length L tuple of FreeTensors of shape (M, D(n, W)) where M = M*(B+1)/2 
-    where B is the batch size and D(n, W) is the dimension of the tensor basis with respect to
-    depth n and width W. Each of these tensors are the truncated (to n-1) signatures over 
-    each interval in the partition with the additional change that the initial '1' in each 
-    signature is changed to a '0'.
+class RoughKernel:
+    """
+    Solves the signature kernel PDE (Algorithm 5.1 in the rough signature
+    kernel PDE paper) for a batch of paths.
+    """
 
-    Y_SPTs_zero - sim.
+    def __init__(self, n, R):
+        """
+        n - truncation depth for the log-signature / tensor algebra
+        R - resolution used when building the Lie increment stream
+        """
+        self.n = n
+        self.R = R
 
-    Tensor_Basis - Tensor basis parameterised by n and W.
+    # ------------------------------------------------------------------
+    # Setup: building the Lie increment stream depends on self.n / self.R,
+    # so this is an instance method.
+    # ------------------------------------------------------------------
+    def make_Lie(self, data, times):
+        W = len(data[0][0])
+        Lie_Basis = rpj.LieBasis(depth=self.n, width=W)
+        Tensor_Basis = rpj.to_tensor_basis(Lie_Basis)
+        data_Lie = LieIncrementStream.from_increments(
+            timestamps=times,
+            data=data,
+            input_data_basis=None,
+            resolution=self.R,
+            lie_basis=Lie_Basis
+        )
+        return data_Lie, Tensor_Basis
 
-    Outputs:
-    phi - (L+1) by (L+1) list of tensors each with batch size M
-    psi - as above
-    K - (L+1, L+1, M) shaped jnp array which gives the initial conditions for each pairwise kernel
-    function (the M necessary to represent each pair)
-    '''
+    @staticmethod
+    def initialise_PDE(X_SPTs_zero, Y_SPTs_zero, tensor_basis):
+        '''
+        Inputs:
+        X_SPTs_zero - a length L tuple of FreeTensors of shape (M, D(n, W)) where M = M*(B+1)/2
+        where B is the batch size and D(n, W) is the dimension of the tensor basis with respect to
+        depth n and width W. Each of these tensors are the truncated (to n-1) signatures over
+        each interval in the partition with the additional change that the initial '1' in each
+        signature is changed to a '0'.
 
-    L = len(X_SPTs_zero)
-    M, _ = X_SPTs_zero[0].shape
+        Y_SPTs_zero - sim.
 
-    K = jnp.zeros((L+1, L+1, M), dtype=jnp.float32) 
-    # Since the paper gives K[0, v] as the inner product of Z_0^x and Z_v^y and analogous for K[u, 0], I assume we are setting Z_0^x = 1 = Z_0^y where 1 = (1,0,0,0,...) 
-    # is in the signature sense
-    
-    K = K.at[0, :, :].set(1)
-    K = K.at[:, 0, :].set(1)
+        tensor_basis - Tensor basis parameterised by n and W.
 
-    zero_tensor = rpj.FreeTensor.zero(basis=tensor_basis, batch_dims=(M,))
-    phi = [[zero_tensor for _ in range(L+1)] for _ in range(L+1)]
-    psi = [[zero_tensor for _ in range(L+1)] for _ in range(L+1)]
+        Outputs:
+        phi - (L+1) by (L+1) list of tensors each with batch size M
+        psi - as above
+        K - (L+1, L+1, M) shaped jnp array which gives the initial conditions for each pairwise kernel
+        function (the M necessary to represent each pair)
+        '''
+        L = len(X_SPTs_zero)
+        M, _ = X_SPTs_zero[0].shape
 
-    for i in range(1, L+1):
-        phi[i][0] = X_SPTs_zero[i-1]
-    for j in range(1, L+1):
-        psi[0][j] = Y_SPTs_zero[j-1]
-    return phi, psi, K
+        K = jnp.zeros((L + 1, L + 1, M), dtype=jnp.float32)
+        # Since the paper gives K[0, v] as the inner product of Z_0^x and Z_v^y (and analogously
+        # for K[u, 0]), we assume Z_0^x = 1 = Z_0^y where 1 = (1, 0, 0, ...) in the signature sense
+        K = K.at[0, :, :].set(1)
+        K = K.at[:, 0, :].set(1)
 
-#---------------------------------------------------------------------------------
-# functions for computing algorithm 5.1 in rough signature kernel PDE paper
-#---------------------------------------------------------------------------------
-# rpj.ft_mul is correct
-def compute_phi(xi, xti, phi01, psi01, K00):
-    phi11 = phi01 + xti.__mul__(K00)\
-            + rpj.ft_mul(phi01,xti)\
-            + add_tensor_scalar(as_free_tensor(rpj.ft_adjoint_left_mul(psi01, xi)), 
-                                - rpj.tensor_pairing(psi01, xti))
+        zero_tensor = rpj.FreeTensor.zero(basis=tensor_basis, batch_dims=(M,))
+        phi = [[zero_tensor for _ in range(L + 1)] for _ in range(L + 1)]
+        psi = [[zero_tensor for _ in range(L + 1)] for _ in range(L + 1)]
 
-    return phi11
+        for i in range(1, L + 1):
+            phi[i][0] = X_SPTs_zero[i - 1]
+        for j in range(1, L + 1):
+            psi[0][j] = Y_SPTs_zero[j - 1]
+        return phi, psi, K
 
-def compute_psi(yj, ytj, phi10, psi10, K00):
-    psi11 = psi10 + ytj.__mul__(K00)\
-            + rpj.ft_mul(psi10, ytj)\
-            + add_tensor_scalar(as_free_tensor(rpj.ft_adjoint_left_mul(phi10, yj)), 
-                                - rpj.tensor_pairing(phi10, ytj))
-    return psi11
+    @staticmethod
+    def compute_phi(xi, xti, phi01, psi01, K00):
+        phi11 = phi01 + xti.__mul__(K00) \
+            + rpj.ft_mul(phi01, xti) \
+            + add_tensor_scalar(
+                as_free_tensor(rpj.ft_adjoint_left_mul(psi01, xi)),
+                -rpj.tensor_pairing(psi01, xti))
+        return phi11
 
-def compute_K(xi, yj, phi00, phi01, phi10, phi11, psi00, psi01, psi10, psi11, K00, K01, K10):
+    @staticmethod
+    def compute_psi(yj, ytj, phi10, psi10, K00):
+        psi11 = psi10 + ytj.__mul__(K00) \
+            + rpj.ft_mul(psi10, ytj) \
+            + add_tensor_scalar(
+                as_free_tensor(rpj.ft_adjoint_left_mul(phi10, yj)),
+                -rpj.tensor_pairing(phi10, ytj))
+        return psi11
 
-    eval_adj_ = eval_adj(phi00, psi00, xi, yj)
-    next_eval_adj = eval_adj(phi11, psi11, xi, yj) # maybe these can be done with built in rpj methods
-    temp_2 =  eval_adj(phi01, psi01, xi, yj)
-    temp_3 = eval_adj(phi10, psi10, xi, yj)
+    @staticmethod
+    def compute_K(xi, yj, phi00, phi01, phi10, phi11, psi00, psi01, psi10, psi11, K00, K01, K10):
+        eval_adj_ = eval_adj(phi00, psi00, xi, yj)
+        next_eval_adj = eval_adj(phi11, psi11, xi, yj)
+        temp_2 = eval_adj(phi01, psi01, xi, yj)
+        temp_3 = eval_adj(phi10, psi10, xi, yj)
 
-    G = rpj.tensor_pairing(xi, yj)
-    f_1 = K00 * G + eval_adj_
-    f_2 = K01 * G + temp_2 
-    f_3 = K10 * G + temp_3 
+        G = rpj.tensor_pairing(xi, yj)
+        f_1 = K00 * G + eval_adj_
+        f_2 = K01 * G + temp_2
+        f_3 = K10 * G + temp_3
 
-    u_p = K10 + K01 - K00 + f_1
-    f_p = u_p * G + next_eval_adj
+        u_p = K10 + K01 - K00 + f_1
+        f_p = u_p * G + next_eval_adj
 
-    K11 = K10 + K01 - K00 + (1./4)*(f_1 + f_2 + f_3 + f_p)
-    return K11
+        K11 = K10 + K01 - K00 + (1. / 4) * (f_1 + f_2 + f_3 + f_p)
+        return K11
 
-def partition_compute(phi, psi, K, L, xlsps, ylsps, xlspts, ylspts):
+    # ------------------------------------------------------------------
+    # This one is jitted, and since it's a bound method `self` becomes
+    # positional argument 0 — so it must be added to static_argnums,
+    # shifting every other static index up by one from the free-function
+    # version. `self` is safe to mark static here because RoughKernel
+    # instances are hashed by identity and n/R don't change after init.
+    # ------------------------------------------------------------------
+    #@partial(jax.jit, static_argnums=(0, 4, 9))
+    def partition_compute(self, phi, psi, K, L, xlsps, ylsps, xlspts, ylspts, tensor_basis):
+        for i in range(L):
+            for j in range(L):
+                xi = xlsps[i]
+                yj = ylsps[j]
+                xti = xlspts[i]
+                ytj = ylspts[j]
+                phi00, phi01, phi10 = phi[i][j], phi[i][j + 1], phi[i + 1][j]
+                psi00, psi01, psi10 = psi[i][j], psi[i][j + 1], psi[i + 1][j]
+                K00, K01, K10 = K[i][j], K[i][j + 1], K[i + 1][j]
 
-    for i in range(L):
-        for j in range(L):
-            xi = xlsps[i]
-            yj = ylsps[j]
-            xti = xlspts[i]
-            ytj = ylspts[j]
-            phi00, phi01, phi10 = phi[i][j], phi[i][j+1], phi[i+1][j]
-            psi00, psi01, psi10 = psi[i][j], psi[i][j+1], psi[i+1][j]
-            K00, K01, K10 = K[i][j], K[i][j+1], K[i+1][j]
-            phi11 = compute_phi(xi, xti, phi01, psi01, K00)
-            psi11 = compute_psi(yj, ytj, phi10, psi10, K00)
-            phi[i+1][j+1] = phi11
-            psi[i+1][j+1] = psi11
-            K11 = compute_K(xi, yj, phi00, phi01, phi10, phi11, psi00, psi01, psi10, psi11, K00, K01, K10)
-            K = K.at[i+1, j+1].set(K11)
-    return K    
-#-------------------------------------------------------------------------
-# combines previous functions to solve the PDE and return the kernel matrix
-#-------------------------------------------------------------------------
+                phi11 = self.compute_phi(xi, xti, phi01, psi01, K00)
+                psi11 = self.compute_psi(yj, ytj, phi10, psi10, K00)
+                phi[i + 1][j + 1] = phi11
+                psi[i + 1][j + 1] = psi11
 
-def solve_PDE(data, times, intervals, n, R):
+                K11 = self.compute_K(xi, yj, phi00, phi01, phi10, phi11,
+                                      psi00, psi01, psi10, psi11, K00, K01, K10)
+                K = K.at[i + 1, j + 1].set(K11)
+        return K
 
-    B = len(data)
-    L = len(intervals)
+    # ------------------------------------------------------------------
+    # Top-level driver: depends on self.n / self.R (via make_Lie), so
+    # it's an instance method.
+    # ------------------------------------------------------------------
+    def solve_PDE(self, data, times, intervals):
+        B = len(data)
+        L = len(intervals)
 
-    data_Lie, Tensor_Basis = make_Lie(data, times, n, R)
+        data_Lie, Tensor_Basis = self.make_Lie(data, times)
 
-    pairs = jnp.stack(jnp.triu_indices(B), axis=1)
-    X_LSPs, X_LSPTs, X_SPTs_zero = sigs_over_intervals(data_Lie, intervals, n)
+        pairs = jnp.stack(jnp.triu_indices(B), axis=1)
+        X_LSPs, X_LSPTs, X_SPTs_zero = sigs_over_intervals(data_Lie, intervals, self.n)
 
-    xspts_zero = ft_pairs(X_SPTs_zero, pairs, 0, Tensor_Basis)
-    yspts_zero = ft_pairs(X_SPTs_zero, pairs, 1, Tensor_Basis)
-    xlsps = ft_pairs(X_LSPs, pairs, 0, Tensor_Basis)
-    ylsps = ft_pairs(X_LSPs, pairs, 1, Tensor_Basis)
-    xlspts = ft_pairs(X_LSPTs, pairs, 0, Tensor_Basis)
-    ylspts = ft_pairs(X_LSPTs, pairs, 1, Tensor_Basis)
+        xspts_zero = ft_pairs(X_SPTs_zero, pairs, 0, Tensor_Basis)
+        yspts_zero = ft_pairs(X_SPTs_zero, pairs, 1, Tensor_Basis)
+        xlsps = ft_pairs(X_LSPs, pairs, 0, Tensor_Basis)
+        ylsps = ft_pairs(X_LSPs, pairs, 1, Tensor_Basis)
+        xlspts = ft_pairs(X_LSPTs, pairs, 0, Tensor_Basis)
+        ylspts = ft_pairs(X_LSPTs, pairs, 1, Tensor_Basis)
 
-    phi_init, psi_init, K_init = initialise_PDE(X_SPTs_zero=xspts_zero, 
-                                 Y_SPTs_zero=yspts_zero,
-                                 tensor_basis=Tensor_Basis)
+        phi_init, psi_init, K_init = self.initialise_PDE(
+            X_SPTs_zero=xspts_zero,
+            Y_SPTs_zero=yspts_zero,
+            tensor_basis=Tensor_Basis
+        )
 
-    K = partition_compute(phi=phi_init,
-                          psi=psi_init,
-                          K=K_init,
-                          L=L,
-                          xlsps=xlsps,
-                          ylsps=ylsps,
-                          xlspts=xlspts,
-                          ylspts=ylspts
-    )
-    return K
+        K = self.partition_compute(
+            phi=phi_init,
+            psi=psi_init,
+            K=K_init,
+            L=L,
+            xlsps=xlsps,
+            ylsps=ylsps,
+            xlspts=xlspts,
+            ylspts=ylspts,
+            tensor_basis=Tensor_Basis
+        )
+        return K
