@@ -83,7 +83,6 @@ class RoughKernel:
         return phi, psi, K
 
     @staticmethod
-    @jax.jit
     def compute_phi(xi, xti, phi01, psi01, K00):
         phi11 = phi01 + xti.__mul__(K00) \
             + rpj.ft_mul(phi01, xti) \
@@ -93,7 +92,6 @@ class RoughKernel:
         return phi11
 
     @staticmethod
-    @jax.jit
     def compute_psi(yj, ytj, phi10, psi10, K00):
         psi11 = psi10 + ytj.__mul__(K00) \
             + rpj.ft_mul(psi10, ytj) \
@@ -103,6 +101,7 @@ class RoughKernel:
         return psi11
 
     @staticmethod
+    @jax.jit
     def compute_K(xi, yj, phi00, phi01, phi10, phi11, psi00, psi01, psi10, psi11, K00, K01, K10):
         eval_adj_ = eval_adj(phi00, psi00, xi, yj)
         next_eval_adj = eval_adj(phi11, psi11, xi, yj)
@@ -148,7 +147,7 @@ class RoughKernel:
                                       psi00, psi01, psi10, psi11, K00, K01, K10)
                 K = K.at[i + 1, j + 1].set(K11)
         return K
-
+    
     # ------------------------------------------------------------------
     # Top-level driver: depends on self.n / self.R (via make_Lie), so
     # it's an instance method.
