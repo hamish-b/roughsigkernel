@@ -43,6 +43,7 @@ class RoughKernel:
         return data_Lie, Tensor_Basis
 
     @staticmethod
+    @jax.jit
     def initialise_PDE(X_SPTs_zero, Y_SPTs_zero, tensor_basis):
         '''
         Inputs:
@@ -82,6 +83,7 @@ class RoughKernel:
         return phi, psi, K
 
     @staticmethod
+    @jax.jit
     def compute_phi(xi, xti, phi01, psi01, K00):
         phi11 = phi01 + xti.__mul__(K00) \
             + rpj.ft_mul(phi01, xti) \
@@ -91,6 +93,7 @@ class RoughKernel:
         return phi11
 
     @staticmethod
+    @jax.jit
     def compute_psi(yj, ytj, phi10, psi10, K00):
         psi11 = psi10 + ytj.__mul__(K00) \
             + rpj.ft_mul(psi10, ytj) \
@@ -150,6 +153,7 @@ class RoughKernel:
     # Top-level driver: depends on self.n / self.R (via make_Lie), so
     # it's an instance method.
     # ------------------------------------------------------------------
+    
     def solve_PDE(self, data, times, intervals):
         B = len(data)
         L = len(intervals)
