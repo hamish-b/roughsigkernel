@@ -4,6 +4,7 @@ import jax
 from roughpy_jax.streams import LieIncrementStream
 from roughpy_jax.algebra import  as_free_tensor
 from functools import partial
+from jax.tree_util import tree_map
 from utils import (ft_pairs, 
                    sigs_over_intervals, 
                    upper_tri_to_symmetric, 
@@ -43,7 +44,6 @@ class RoughKernel:
         return data_Lie, Tensor_Basis
 
     @staticmethod
-    @jax.jit
     def initialise_PDE(X_SPTs_zero, Y_SPTs_zero, tensor_basis):
         '''
         Inputs:
@@ -80,6 +80,10 @@ class RoughKernel:
             phi[i][0] = X_SPTs_zero[i - 1]
         for j in range(1, L + 1):
             psi[0][j] = Y_SPTs_zero[j - 1]
+
+        phi = rpj.FreeTensor(phi, tensor_basis)
+        psi = rpj.FreeTensor(psi, tensor_basis)
+
         return phi, psi, K
 
     @staticmethod
@@ -130,26 +134,70 @@ class RoughKernel:
     # ------------------------------------------------------------------
     @partial(jax.jit, static_argnums=(0, 4,))
     def partition_compute(self, phi, psi, K, L, xlsps, ylsps, xlspts, ylspts):
+        
+        def get(tree, i, j):
+            return tree_map(lambda x: x[i, j], tree)
+
+        def set_(tree, i, j, val):
+            return tree_map(lambda x, v: x.at[i, j].set(v), tree, val)
+        
         for i in range(L):
             for j in range(L):
                 xi = xlsps[i]
                 yj = ylsps[j]
                 xti = xlspts[i]
                 ytj = ylspts[j]
-                phi00, phi01, phi10 = phi[i][j], phi[i][j + 1], phi[i + 1][j]
-                psi00, psi01, psi10 = psi[i][j], psi[i][j + 1], psi[i + 1][j]
+                phi00, phi01, phi10 = get(phi, i, j), get(phi, i, j + 1), get(phi, i + 1, j)
+                psi00, psi01, psi10 = get(psi, i, j), get(psi, i, j + 1), get(psi, i + 1, j)
                 K00, K01, K10 = K[i][j], K[i][j + 1], K[i + 1][j]
 
                 phi11 = self.compute_phi(xi, xti, phi01, psi01, K00)
                 psi11 = self.compute_psi(yj, ytj, phi10, psi10, K00)
-                phi[i + 1][j + 1] = phi11
-                psi[i + 1][j + 1] = psi11
-
                 K11 = self.compute_K(xi, yj, phi00, phi01, phi10, phi11,
                                       psi00, psi01, psi10, psi11, K00, K01, K10)
+
+                phi = set_(phi, i + 1, j + 1, phi11)
+                psi = set_(psi, i + 1, j + 1, psi11)
                 K = K.at[i + 1, j + 1].set(K11)
         return K
-    
+
+# better way with JAX if can get working
+    @partial(jax.jit, static_argnums=(0, 4))
+    def partition_compute_mod(self, phi, psi, K, L, xlsps, ylsps, xlspts, ylspts):
+
+        def get(tree, i, j):
+            return tree_map(lambda x: x[i, j], tree)
+
+        def set_(tree, i, j, val):
+            return tree_map(lambda x, v: x.at[i, j].set(v), tree, val)
+
+        def outer_body(i, carry):
+            phi, psi, K = carry
+
+            def inner_body(j, carry):
+                phi, psi, K = carry
+                xi, yj = xlsps[i], ylsps[j]
+                xti, ytj = xlspts[i], ylspts[j]
+
+                phi00, phi01, phi10 = get(phi, i, j), get(phi, i, j + 1), get(phi, i + 1, j)
+                psi00, psi01, psi10 = get(psi, i, j), get(psi, i, j + 1), get(psi, i + 1, j)
+                K00, K01, K10 = K[i, j], K[i, j + 1], K[i + 1, j]
+
+                phi11 = self.compute_phi(xi, xti, phi01, psi01, K00)
+                psi11 = self.compute_psi(yj, ytj, phi10, psi10, K00)
+                K11 = self.compute_K(xi, yj, phi00, phi01, phi10, phi11,
+                                        psi00, psi01, psi10, psi11, K00, K01, K10)
+
+                phi = set_(phi, i + 1, j + 1, phi11)
+                psi = set_(psi, i + 1, j + 1, psi11)
+                K = K.at[i + 1, j + 1].set(K11)
+                return (phi, psi, K)
+
+            return jax.lax.fori_loop(0, L, inner_body, (phi, psi, K))
+
+        phi, psi, K = jax.lax.fori_loop(0, L, outer_body, (phi, psi, K))
+        return phi, psi, K   
+
     # ------------------------------------------------------------------
     # Top-level driver: depends on self.n / self.R (via make_Lie), so
     # it's an instance method.
@@ -185,7 +233,6 @@ class RoughKernel:
             xlsps=xlsps,
             ylsps=ylsps,
             xlspts=xlspts,
-            ylspts=ylspts,
-            tensor_basis=Tensor_Basis
+            ylspts=ylspts
         )
         return K
