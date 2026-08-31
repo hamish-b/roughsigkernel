@@ -7,6 +7,8 @@ from roughpy_jax.intervals import IntervalType, Partition
 from roughpy_jax.algebra import to_signature, antipode, to_log_signature, lie_to_tensor, as_free_tensor
 from roughpy_jax.dense_algebra import get_batch_shape, _algebra_scalar_multiply, broadcast_to_batch_shape
 from utils import one_to_zero, trunc
+
+
 def make_Lie_single(data, times, n, R, W):
 
     Lie_Basis = rpj.LieBasis(depth = n, width = W)
