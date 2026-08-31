@@ -83,6 +83,7 @@ class RoughKernel:
         return phi, psi, K
 
     @staticmethod
+    @jax.jit
     def compute_phi(xi, xti, phi01, psi01, K00):
         phi11 = phi01 + xti.__mul__(K00) \
             + rpj.ft_mul(phi01, xti) \
@@ -92,6 +93,7 @@ class RoughKernel:
         return phi11
 
     @staticmethod
+    @jax.jit
     def compute_psi(yj, ytj, phi10, psi10, K00):
         psi11 = psi10 + ytj.__mul__(K00) \
             + rpj.ft_mul(psi10, ytj) \
@@ -126,8 +128,8 @@ class RoughKernel:
     # version. `self` is safe to mark static here because RoughKernel
     # instances are hashed by identity and n/R don't change after init.
     # ------------------------------------------------------------------
-    #@partial(jax.jit, static_argnums=(0, 4, 9))
-    def partition_compute(self, phi, psi, K, L, xlsps, ylsps, xlspts, ylspts, tensor_basis):
+    @partial(jax.jit, static_argnums=(0, 4,))
+    def partition_compute(self, phi, psi, K, L, xlsps, ylsps, xlspts, ylspts):
         for i in range(L):
             for j in range(L):
                 xi = xlsps[i]

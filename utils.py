@@ -157,8 +157,8 @@ def add_tensor_scalar(a, s):
     '''
     #result = _algebra_scalar_multiply(identity_like(a), s)
     #return result
-    result = a.__array__().copy() 
-    result[0, 0] += s[0]
+    result = a.data
+    result = result.at[0, 0].set(0)
     return rpj.FreeTensor(result, a.basis)
 
 # creates a symmetric BxB matrix from a length B*(B+1)/2 array
