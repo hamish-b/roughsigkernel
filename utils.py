@@ -117,7 +117,6 @@ def uniform_intervals(interval_count):
 def trunc(X_LSP, old_depth, new_depth):
     return tuple(x.change_depth(new_depth).change_depth(old_depth) for x in X_LSP)
 
- 
 def ft_pairs(tuple_of_arrays, pairs, order, tensor_basis):
     '''
     helper function which changes the batch size of each tensor in the input so that there are
@@ -162,11 +161,12 @@ def add_tensor_scalar(a, s):
     return rpj.FreeTensor(result, a.basis)
 
 # creates a symmetric BxB matrix from a length B*(B+1)/2 array
-def upper_tri_to_symmetric(x, B):
-    i, j = jnp.triu_indices(B)
-    A = jnp.zeros((B, B), dtype=x.dtype)
-    A = A.at[i, j].set(x)
-    A = A.at[j, i].set(x)
+def upper_tri_to_symmetric(array, pairs, B):
+    A = jnp.zeros((B, B), dtype=array.dtype)
+    for k in range(len(pairs)):
+        i, j = pairs[k]
+        A = A.at[i, j].set(array[k])
+        A = A.at[j, i].set(array[k])
     return A 
 
     

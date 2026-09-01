@@ -20,7 +20,7 @@ class RoughKernel:
 
     def __init__(self, n, R):
         """
-        n - truncation depth for the log-signature / tensor algebra
+        n - truncation depth for the log-signature / signature
         R - resolution used when building the Lie increment stream
         """
         self.n = n
@@ -33,7 +33,6 @@ class RoughKernel:
     def make_Lie(self, data, times):
         W = len(data[0][0])
         Lie_Basis = rpj.LieBasis(depth=self.n, width=W)
-        Tensor_Basis = rpj.to_tensor_basis(Lie_Basis)
         data_Lie = LieIncrementStream.from_increments(
             timestamps=times,
             data=data,
@@ -41,7 +40,7 @@ class RoughKernel:
             resolution=self.R,
             lie_basis=Lie_Basis
         )
-        return data_Lie, Tensor_Basis
+        return data_Lie
 
     @staticmethod
     def initialise_PDE(X_SPTs_zero, Y_SPTs_zero, tensor_basis):
@@ -64,7 +63,7 @@ class RoughKernel:
         function (the M necessary to represent each pair)
         '''
         L = len(X_SPTs_zero)
-        M, _ = X_SPTs_zero[0].shape
+        M, _ = X_SPTs_zero[0].shape # M is the no. of pairs
 
         K = jnp.zeros((L + 1, L + 1, M), dtype=jnp.float32)
         # Since the paper gives K[0, v] as the inner product of Z_0^x and Z_v^y (and analogously
@@ -161,7 +160,7 @@ class RoughKernel:
                 K = K.at[i + 1, j + 1].set(K11)
         return K
 
-# better way with JAX if can get working
+# better way with JAX if can get working, having issues with xlsps
     @partial(jax.jit, static_argnums=(0, 4))
     def partition_compute_mod(self, phi, psi, K, L, xlsps, ylsps, xlspts, ylspts):
 
@@ -203,21 +202,35 @@ class RoughKernel:
     # it's an instance method.
     # ------------------------------------------------------------------
     
-    def solve_PDE(self, data, times, intervals):
-        B = len(data)
+    def solve_PDE(self, intervals, X, Y, is_Lie, times_X = None, times_Y = None):
+
         L = len(intervals)
 
-        data_Lie, Tensor_Basis = self.make_Lie(data, times)
+        if is_Lie:
+            X_Lie, Y_Lie, Tensor_Basis = X, Y, X.group_basis
+            B1, B2 = X.batch_dims, Y.batch_dims
+        else:
+            X_Lie, Y_Lie = self.make_Lie(X, times_X), self.make_Lie(Y, times_Y)
+            B1, B2 = len(X), len(Y)
+            Tensor_Basis = X_Lie.group_basis
 
-        pairs = jnp.stack(jnp.triu_indices(B), axis=1)
-        X_LSPs, X_LSPTs, X_SPTs_zero = sigs_over_intervals(data_Lie, intervals, self.n)
+        # list containing every pair (x_i, y_j) s.t. x in X, y in Y. if X = Y, only need B*(B+1)/2
+        if X == Y:
+            pairs = jnp.stack(jnp.triu_indices(B1), axis=1)
+            same = True
+        else:
+            pairs = jnp.array([(i, j) for i in range(B1) for j in range(B2)])
+            same = False
+
+        X_LSPs, X_LSPTs, X_SPTs_zero = sigs_over_intervals(X_Lie, intervals, self.n)
+        Y_LSPs, Y_LSPTs, Y_SPTs_zero = sigs_over_intervals(Y_Lie, intervals, self.n)
 
         xspts_zero = ft_pairs(X_SPTs_zero, pairs, 0, Tensor_Basis)
-        yspts_zero = ft_pairs(X_SPTs_zero, pairs, 1, Tensor_Basis)
+        yspts_zero = ft_pairs(Y_SPTs_zero, pairs, 1, Tensor_Basis)
         xlsps = ft_pairs(X_LSPs, pairs, 0, Tensor_Basis)
-        ylsps = ft_pairs(X_LSPs, pairs, 1, Tensor_Basis)
+        ylsps = ft_pairs(Y_LSPs, pairs, 1, Tensor_Basis)
         xlspts = ft_pairs(X_LSPTs, pairs, 0, Tensor_Basis)
-        ylspts = ft_pairs(X_LSPTs, pairs, 1, Tensor_Basis)
+        ylspts = ft_pairs(Y_LSPTs, pairs, 1, Tensor_Basis)
 
         phi_init, psi_init, K_init = self.initialise_PDE(
             X_SPTs_zero=xspts_zero,
@@ -235,4 +248,10 @@ class RoughKernel:
             xlspts=xlspts,
             ylspts=ylspts
         )
-        return K
+
+        if same:
+            Gram = upper_tri_to_symmetric(K[-1, -1], pairs, B1)
+        else:
+            Gram = K[-1, -1].reshape(B1, B2)
+
+        return Gram
