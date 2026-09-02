@@ -164,6 +164,10 @@ class RoughKernel:
     @partial(jax.jit, static_argnums=(0, 4))
     def partition_compute_mod(self, phi, psi, K, L, xlsps, ylsps, xlspts, ylspts):
 
+
+        def get_(tree, i):
+            return tree_map(lambda x: x[i], tree)
+        
         def get(tree, i, j):
             return tree_map(lambda x: x[i, j], tree)
 
@@ -175,8 +179,8 @@ class RoughKernel:
 
             def inner_body(j, carry):
                 phi, psi, K = carry
-                xi, yj = xlsps[i], ylsps[j]
-                xti, ytj = xlspts[i], ylspts[j]
+                xi, yj = get_(xlsps, i), get_(ylsps, j)
+                xti, ytj = get_(xlspts, i), get_(ylspts, j)
 
                 phi00, phi01, phi10 = get(phi, i, j), get(phi, i, j + 1), get(phi, i + 1, j)
                 psi00, psi01, psi10 = get(psi, i, j), get(psi, i, j + 1), get(psi, i + 1, j)
@@ -195,7 +199,7 @@ class RoughKernel:
             return jax.lax.fori_loop(0, L, inner_body, (phi, psi, K))
 
         phi, psi, K = jax.lax.fori_loop(0, L, outer_body, (phi, psi, K))
-        return phi, psi, K   
+        return K   
 
     # ------------------------------------------------------------------
     # Top-level driver: depends on self.n / self.R (via make_Lie), so
@@ -237,8 +241,13 @@ class RoughKernel:
             Y_SPTs_zero=yspts_zero,
             tensor_basis=Tensor_Basis
         )
+        
+        xlsps = rpj.FreeTensor(xlsps, Tensor_Basis)
+        xlspts = rpj.FreeTensor(xlspts, Tensor_Basis)
+        ylsps = rpj.FreeTensor(ylsps, Tensor_Basis)
+        ylspts = rpj.FreeTensor(ylspts, Tensor_Basis)
 
-        K = self.partition_compute(
+        K = self.partition_compute_mod(
             phi=phi_init,
             psi=psi_init,
             K=K_init,
@@ -248,7 +257,7 @@ class RoughKernel:
             xlspts=xlspts,
             ylspts=ylspts
         )
-
+        
         if same:
             Gram = upper_tri_to_symmetric(K[-1, -1], pairs, B1)
         else:
