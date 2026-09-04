@@ -65,20 +65,20 @@ class RoughKernel:
         L = len(X_SPTs_zero)
         M, _ = X_SPTs_zero[0].shape # M is the no. of pairs
 
-        K = jnp.zeros((L + 1, L + 1, M), dtype=jnp.float32)
+        K = jnp.zeros((L + 1, L + 1, M), dtype=jnp.float64) # change second L to N (different partition for Y)??
         # Since the paper gives K[0, v] as the inner product of Z_0^x and Z_v^y (and analogously
         # for K[u, 0]), we assume Z_0^x = 1 = Z_0^y where 1 = (1, 0, 0, ...) in the signature sense
         K = K.at[0, :, :].set(1)
         K = K.at[:, 0, :].set(1)
 
         zero_tensor = rpj.FreeTensor.zero(basis=tensor_basis, batch_dims=(M,))
-        phi = [[zero_tensor for _ in range(L + 1)] for _ in range(L + 1)]
+        phi = [[zero_tensor for _ in range(L + 1)] for _ in range(L + 1)] # again can change second L to N as there is no reason these need be the same
         psi = [[zero_tensor for _ in range(L + 1)] for _ in range(L + 1)]
 
         for i in range(1, L + 1):
             phi[i][0] = X_SPTs_zero[i - 1]
         for j in range(1, L + 1):
-            psi[0][j] = Y_SPTs_zero[j - 1]
+            psi[0][j] = Y_SPTs_zero[j - 1] # change L to N (N=len(Y))
 
         phi = rpj.FreeTensor(phi, tensor_basis)
         psi = rpj.FreeTensor(psi, tensor_basis)
@@ -141,7 +141,7 @@ class RoughKernel:
             return tree_map(lambda x, v: x.at[i, j].set(v), tree, val)
         
         for i in range(L):
-            for j in range(L):
+            for j in range(L): # change this L to N?
                 xi = xlsps[i]
                 yj = ylsps[j]
                 xti = xlspts[i]
@@ -160,7 +160,7 @@ class RoughKernel:
                 K = K.at[i + 1, j + 1].set(K11)
         return K
 
-# better way with JAX if can get working, having issues with xlsps
+# better version of partition_compute using jax.lax.fori_loop
     @partial(jax.jit, static_argnums=(0, 4))
     def partition_compute_mod(self, phi, psi, K, L, xlsps, ylsps, xlspts, ylspts):
 
@@ -196,7 +196,7 @@ class RoughKernel:
                 K = K.at[i + 1, j + 1].set(K11)
                 return (phi, psi, K)
 
-            return jax.lax.fori_loop(0, L, inner_body, (phi, psi, K))
+            return jax.lax.fori_loop(0, L, inner_body, (phi, psi, K)) # change this L to N?
 
         phi, psi, K = jax.lax.fori_loop(0, L, outer_body, (phi, psi, K))
         return K   
@@ -208,11 +208,11 @@ class RoughKernel:
     
     def solve_PDE(self, intervals, X, Y, is_Lie, times_X = None, times_Y = None):
 
-        L = len(intervals)
+        L = len(intervals) # L = len(intervals_X), N = len(intervals_Y)
 
         if is_Lie:
             X_Lie, Y_Lie, Tensor_Basis = X, Y, X.group_basis
-            B1, B2 = X.batch_dims, Y.batch_dims
+            B1, B2 = X.batch_dims[0], Y.batch_dims[0]
         else:
             X_Lie, Y_Lie = self.make_Lie(X, times_X), self.make_Lie(Y, times_Y)
             B1, B2 = len(X), len(Y)
@@ -264,3 +264,5 @@ class RoughKernel:
             Gram = K[-1, -1].reshape(B1, B2)
 
         return Gram
+
+    
