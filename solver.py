@@ -206,7 +206,7 @@ class RoughKernel:
     # it's an instance method.
     # ------------------------------------------------------------------
     
-    def solve_PDE(self, intervals, X, Y, is_Lie, times_X = None, times_Y = None):
+    def solve_PDE(self, intervals, X, Y, is_Lie, times_X = None, times_Y = None, pair_batch_size=4096):
 
         L = len(intervals) # L = len(intervals_X), N = len(intervals_Y)
 
@@ -229,40 +229,66 @@ class RoughKernel:
         X_LSPs, X_LSPTs, X_SPTs_zero = sigs_over_intervals(X_Lie, intervals, self.n)
         Y_LSPs, Y_LSPTs, Y_SPTs_zero = sigs_over_intervals(Y_Lie, intervals, self.n)
 
-        xspts_zero = ft_pairs(X_SPTs_zero, pairs, 0, Tensor_Basis)
-        yspts_zero = ft_pairs(Y_SPTs_zero, pairs, 1, Tensor_Basis)
-        xlsps = ft_pairs(X_LSPs, pairs, 0, Tensor_Basis)
-        ylsps = ft_pairs(Y_LSPs, pairs, 1, Tensor_Basis)
-        xlspts = ft_pairs(X_LSPTs, pairs, 0, Tensor_Basis)
-        ylspts = ft_pairs(Y_LSPTs, pairs, 1, Tensor_Basis)
+        results = []
 
-        phi_init, psi_init, K_init = self.initialise_PDE(
-            X_SPTs_zero=xspts_zero,
-            Y_SPTs_zero=yspts_zero,
-            tensor_basis=Tensor_Basis
-        )
-        
-        xlsps = rpj.FreeTensor(xlsps, Tensor_Basis)
-        xlspts = rpj.FreeTensor(xlspts, Tensor_Basis)
-        ylsps = rpj.FreeTensor(ylsps, Tensor_Basis)
-        ylspts = rpj.FreeTensor(ylspts, Tensor_Basis)
+        # Process P pairs at a time
+        for start in range(0, len(pairs), pair_batch_size):
 
-        K = self.partition_compute_mod(
-            phi=phi_init,
-            psi=psi_init,
-            K=K_init,
-            L=L,
-            xlsps=xlsps,
-            ylsps=ylsps,
-            xlspts=xlspts,
-            ylspts=ylspts
-        )
-        
+            pair_batch = pairs[start:start + pair_batch_size]
+
+            xspts_zero = ft_pairs(
+                X_SPTs_zero, pair_batch, 0, Tensor_Basis
+            )
+            yspts_zero = ft_pairs(
+                Y_SPTs_zero, pair_batch, 1, Tensor_Basis
+            )
+
+            xlsps = ft_pairs(
+                X_LSPs, pair_batch, 0, Tensor_Basis
+            )
+            ylsps = ft_pairs(
+                Y_LSPs, pair_batch, 1, Tensor_Basis
+            )
+
+            xlspts = ft_pairs(
+                X_LSPTs, pair_batch, 0, Tensor_Basis
+            )
+            ylspts = ft_pairs(
+                Y_LSPTs, pair_batch, 1, Tensor_Basis
+            )
+
+            phi_init, psi_init, K_init = self.initialise_PDE(
+                X_SPTs_zero=xspts_zero,
+                Y_SPTs_zero=yspts_zero,
+                tensor_basis=Tensor_Basis,
+            )
+
+            xlsps = rpj.FreeTensor(xlsps, Tensor_Basis)
+            xlspts = rpj.FreeTensor(xlspts, Tensor_Basis)
+            ylsps = rpj.FreeTensor(ylsps, Tensor_Basis)
+            ylspts = rpj.FreeTensor(ylspts, Tensor_Basis)
+
+            K = self.partition_compute_mod(
+                phi=phi_init,
+                psi=psi_init,
+                K=K_init,
+                L=L,
+                xlsps=xlsps,
+                ylsps=ylsps,
+                xlspts=xlspts,
+                ylspts=ylspts,
+            )
+
+            results.append(K[-1, -1])
+
+        # Combine all pair results
+        K_final = jnp.concatenate(results, axis=0)
+
         if same:
-            Gram = upper_tri_to_symmetric(K[-1, -1], pairs, B1)
+            Gram = upper_tri_to_symmetric(
+                K_final, pairs, B1
+            )
         else:
-            Gram = K[-1, -1].reshape(B1, B2)
+            Gram = K_final.reshape(B1, B2)
 
         return Gram
-
-    
