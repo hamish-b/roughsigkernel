@@ -107,7 +107,7 @@ def make_Lie(data, times, n, R):
 # creates `interval_count` uniform intervals from 0 to 1
 
 def uniform_intervals(interval_count):
-    endpoints = jnp.linspace(0, 1, interval_count + 1, dtype=jnp.float32).tolist()
+    endpoints = jnp.linspace(0, 1, interval_count + 1, dtype=jnp.float64).tolist()
     partition = Partition(endpoints, IntervalType.ClOpen)
     return partition.to_intervals()
 
@@ -168,5 +168,20 @@ def upper_tri_to_symmetric(array, pairs, B):
         A = A.at[i, j].set(array[k])
         A = A.at[j, i].set(array[k])
     return A 
+
+def perturb_streams(streams, message, lie_basis, stream_index, row_index):
+
+    message_Lie = rpj.Lie(message, lie_basis)
+
+    grid0, grid1 = jnp.ix_(stream_index, row_index)
+
+    pieces_to_perturb = streams[grid0, grid1]
+    pieces_to_perturb_Lie = rpj.Lie(pieces_to_perturb, lie_basis)
+    perturbed_pieces = rpj.algebra.cbh(pieces_to_perturb_Lie, message_Lie).data
+
+    perturbed_streams = streams.at[grid0, grid1].set(perturbed_pieces)
+
+    return perturbed_streams
+
 
     
