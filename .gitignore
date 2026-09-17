@@ -22,3 +22,4 @@ RacketSports_experiment.ipynb
 ensembles-10k/
 testing.ipynb
 precompute_4kernels.py
+experiments.py
