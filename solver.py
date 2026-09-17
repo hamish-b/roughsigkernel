@@ -18,21 +18,22 @@ class RoughKernel:
     kernel PDE paper) for a batch of paths.
     """
 
-    def __init__(self, n, R):
+    def __init__(self, n, R, W):
         """
         n - truncation depth for the log-signature / signature
         R - resolution used when building the Lie increment stream
+        W - width (dimension of vector space path takes values in)
         """
         self.n = n
         self.R = R
+        self.W = W
 
     # ------------------------------------------------------------------
     # Setup: building the Lie increment stream depends on self.n / self.R,
     # so this is an instance method.
     # ------------------------------------------------------------------
     def make_Lie(self, data, times):
-        W = len(data[0][0])
-        Lie_Basis = rpj.LieBasis(depth=self.n, width=W)
+        Lie_Basis = rpj.LieBasis(depth=self.n, width=self.W)
         data_Lie = LieIncrementStream.from_increments(
             timestamps=times,
             data=data,
@@ -125,11 +126,7 @@ class RoughKernel:
         return K11
 
     # ------------------------------------------------------------------
-    # This one is jitted, and since it's a bound method `self` becomes
-    # positional argument 0 — so it must be added to static_argnums,
-    # shifting every other static index up by one from the free-function
-    # version. `self` is safe to mark static here because RoughKernel
-    # instances are hashed by identity and n/R don't change after init.
+    # 
     # ------------------------------------------------------------------
     @partial(jax.jit, static_argnums=(0, 4,))
     def partition_compute(self, phi, psi, K, L, xlsps, ylsps, xlspts, ylspts):
