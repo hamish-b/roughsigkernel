@@ -15,11 +15,10 @@ venv/
 .DS_Store
 Thumbs.db
 
-ensembles-10k/__pycache__
-__pycache__/
-RacketSports/
-RacketSports_experiment.ipynb
 ensembles-10k/
-testing.ipynb
-precompute_4kernels.py
-experiments.py
+
+ECG200/
+
+EigenWorms/
+
+RacketSports/experiments.py
