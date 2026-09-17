@@ -22,3 +22,8 @@ ECG200/
 EigenWorms/
 
 RacketSports/experiments.py
+experiments.py
+RacketSports_experiment.ipynb
+precompute_4kernels.py
+testing.ipynb
+RacketSports/
