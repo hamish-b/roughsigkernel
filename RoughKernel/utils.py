@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+from jax.tree_util import tree_map
 import roughpy_jax as rpj
 from roughpy_jax.intervals import IntervalType, Partition
 from roughpy_jax.algebra import lie_to_tensor, _remove_unit_term
@@ -7,114 +8,116 @@ from roughpy_jax.dense_algebra import identity_like, _algebra_scalar_multiply
 from roughpy_jax.streams import LieIncrementStream
 from jax import random
 
-#----------------------------------------------------------------------------
-# helper function for generating data (made by gen AI)
-#----------------------------------------------------------------------------
-
-def generate_sinusoidal_timeseries(key, B, N, W, n_harmonics=3, freq_range=(1.0, 5.0)):
-    """
-    Generate batched sinusoidal-like time-series data using JAX.
-
-    Args:
-        key: jax.random.PRNGKey for reproducibility.
-        B: int, batch size (number of independent time series).
-        N: int, number of timestamps/datapoints per series.
-        W: int, dimensionality of the vector space at each timestamp.
-        n_harmonics: int, number of sine components summed per dimension
-            (more harmonics -> richer/more complex shapes).
-        freq_range: tuple (min_freq, max_freq), range for random frequencies.
-
-    Returns:
-        times: jnp.ndarray of shape (B, N), timestamps in [0, 1], sorted per batch.
-        data: jnp.ndarray of shape (B, N, W), values bounded in [-1, 1].
-    """
-    key_times, key_freq, key_phase, key_weights = random.split(key, 4)
-
-    # --- Timestamps: random in [0, 1], sorted within each batch ---
-    raw_times = random.uniform(key_times, shape=(B, N))
-    times = jnp.sort(raw_times, axis=1)  # (B, N)
-
-    # --- Random harmonic parameters, per batch/dim/harmonic ---
-    freqs = random.uniform(
-        key_freq, shape=(B, W, n_harmonics),
-        minval=freq_range[0], maxval=freq_range[1]
-    )  # (B, W, H)
-
-    phases = random.uniform(
-        key_phase, shape=(B, W, n_harmonics),
-        minval=0.0, maxval=2 * jnp.pi
-    )  # (B, W, H)
-
-    # Random positive weights for each harmonic, normalized to sum to 1
-    # so the weighted sum of sines stays within [-1, 1].
-    raw_weights = random.uniform(key_weights, shape=(B, W, n_harmonics))
-    weights = raw_weights / jnp.sum(raw_weights, axis=-1, keepdims=True)  # (B, W, H)
-
-    def single_series(t, freq, phase, weight):
-        # t: (N,) ; freq, phase, weight: (W, H)
-        # broadcast t -> (N, 1, 1) against (W, H) params
-        angles = 2 * jnp.pi * freq[None, :, :] * t[:, None, None] + phase[None, :, :]
-        sines = jnp.sin(angles)  # (N, W, H)
-        weighted_sum = jnp.sum(sines * weight[None, :, :], axis=-1)  # (N, W)
-        return weighted_sum
-
-    data = jax.vmap(single_series, in_axes=(0, 0, 0, 0))(times, freqs, phases, weights)
-    # data: (B, N, W), guaranteed in [-1, 1] since weights sum to 1 and |sin| <= 1
-
-    return times, data
-
-
-def to_list_format(times, data):
-    """
-    Convert the batched jnp arrays into the exact list structure requested:
-      - times: length-B list of length-N lists of floats
-      - data: length-B list of (N, W) jnp arrays
-    """
-    times_list = [list(map(float, times[b])) for b in range(times.shape[0])]
-    data_list = [data[b] for b in range(data.shape[0])]
-    return times_list, data_list
-
-# given a times and data (which together represent a time-series), returns incremented data and times without the first timestamp 
+#---------------------------------------------------------------------------
+# Helper functions to convert a normal time-series into a LieIncrementStream
+#---------------------------------------------------------------------------
 
 def make_incremental(times, data):
     '''
-    times - jnp.array of shape (B, N)
-    data - jnp.array of shape (B, N, D)
+    Makes the data incremental (which is the format LieIncrementStream.from_increments()) needs.
+
+    Inputs:
+    times - jnp.array of shape (B, N) where B is batch size, N is the length of the time-series
+    data - jnp.array of shape (B, N, W) where W is the dimension the time-series takes values in
+
+    Outputs:
+    times_del - jnp.array of shape (B, N-1) that has the first element of every time series removed
+    data_inc - jnp.array of shape (B, N-1, W) that contains the increments corresponding to the data
     '''
     times_del = times[:, 1:]
     data_inc = jnp.diff(data, axis=1) 
 
     return times_del, data_inc
 
-def make_Lie(data, times, n, R):
+def to_list_format(times, data):
+    """
+    Converts times and data into a list format needed for LieIncrementStream.from_increments()
 
-    W = len(data[0][0])
+    Inputs:
+    times - jnp.array of shape (B, N), B batch size, N length of time-series
+    data - jnp.array of shape (B, N, W), W dimension of vector space the time-series takes values in
+
+    Outputs
+    times - length-B list of length-N lists of floats
+    data - length-B list of (N, W) shaped jnp.arrays
+    """
+    times_list = [list(map(float, times[b])) for b in range(times.shape[0])]
+    data_list = [data[b] for b in range(data.shape[0])]
+    return times_list, data_list
+
+def make_Lie(times, data, n, W, R, incremental = False, input_basis = None):
+    """
+    Converts time-series data into a LieIncrementStream object
+
+    Inputs:
+    times - jnp.array of shape (B, N) where B is batch size, N is the length of the time-series
+    data - jnp.array of shape (B, N, W) where W is the dimension the time-series takes values in
+    n - level to truncate the signature (from now on referred to as depth)
+    R - resolution of the LieIncrementStream, there will be 2^(R) contiguous dyadic intervals 
+        of size 2^(-R)and the LieIncrementStream takes the log-signature over each of these. 
+        It also stores, the value of the log-signature for every larger dyadic interval. i.e.
+        if R = 2, then the LIS will store the values of log-signatures over [0, 1/4],...,[3/4, 1]
+        as well as [0, 1/2], [1/2, 1] and [0, 1].
+    incremental - if data is already incremental don't need to apply make_incremental()
+    input_basis - if data has an input basis use this
+
+    Outputs:
+    data_LIS - data in LieIncrementStream form
+    """
+    if not incremental:
+        times, data = make_incremental(times, data)
+
+    times, data = to_list_format(times, data)
+
     Lie_Basis = rpj.LieBasis(depth = n, width = W)
-    Tensor_Basis = rpj.to_tensor_basis(Lie_Basis)
-    data_Lie = LieIncrementStream.from_increments(
+
+    data_LIS = LieIncrementStream.from_increments(
             timestamps=times,
             data=data,
-            input_data_basis=None,
+            input_data_basis=input_basis,
             resolution=R,
             lie_basis=Lie_Basis
         )
-    return data_Lie, Tensor_Basis
+    return data_LIS
 
 #--------------------------------------------------------------------------
 # Helper functions to manipulate certain rpj objects
 #--------------------------------------------------------------------------
 
-# creates `interval_count` uniform intervals from 0 to 1
-
 def uniform_intervals(interval_count):
-    endpoints = jnp.linspace(0, 1, interval_count + 1, dtype=jnp.float64).tolist()
+    """
+    Creates `interval_count` uniform intervals from 0 to 1.
+    """
+    endpoints = jnp.linspace(0, 1, interval_count + 1, dtype=jnp.float32).tolist()
     partition = Partition(endpoints, IntervalType.ClOpen)
     return partition.to_intervals()
 
-# truncates from old_depth to new_depth, padding the difference with zeroes (.change_depth(old_depth)) 
-# which allows for calculations with original depth tensors
+def trunc_mod(batch_tensor, old_depth, new_depth):
+    return batch_tensor.change_depth(new_depth).change_depth(old_depth)
+
+def sigs_over_intervals_mod(X_LIS, intervals, n):
+    '''
+    calculates log sigs, truncated log-sigs, and signature (with zero instead of 1 in first element)
+    over each interval in intervals. Outputs three tuples of length len(intervals).
+    '''
+
+    X_LSP_tuple = tuple(lie_to_tensor(X_LIS.log_signature(interval)) for interval in intervals)
+    X_LSPs = rpj.FreeTensor(X_LSP_tuple, X_LSP_tuple[0].basis)
+    X_SPs = rpj.ft_exp(X_LSPs, out_basis=X_LSPs.basis)
+    X_LSPTs = trunc_mod(X_LSPs, n, n-1)
+    X_SPTs = trunc_mod(X_SPs, n, n-1)
+    X_SPTs_zero = _remove_unit_term(X_SPTs)
+
+    return X_LSPs, X_LSPTs, X_SPTs_zero
+
+def ft_pairs_mod(batch_tensor, pairs, order, tensor_basis):
+    return rpj.FreeTensor(batch_tensor.data[:, pairs[:, order], :], tensor_basis)
 
 def trunc(X_LSP, old_depth, new_depth):
+    """
+    Truncates from old_depth to new_depth, padding the difference with zeroes  
+    which allows for calculations with original depth tensors.
+    """
     return tuple(x.change_depth(new_depth).change_depth(old_depth) for x in X_LSP)
 
 def ft_pairs(tuple_of_arrays, pairs, order, tensor_basis):
@@ -139,6 +142,19 @@ def sigs_over_intervals(X_Lie, intervals, n):
     return X_LSPs, X_LSPTs, X_SPTs_zero
 
 #-------------------------------------------------------------------------------
+# Helper functions for updating jnp arrays
+#-------------------------------------------------------------------------------
+
+def get(tree, i, j):
+    return tree_map(lambda x: x[i, j], tree)
+
+def get_(tree, i):
+    return tree_map(lambda x: x[i], tree)
+        
+def set_(tree, i, j, val):
+    return tree_map(lambda x, v: x.at[i, j].set(v), tree, val)
+
+#-------------------------------------------------------------------------------
 # Helper functions for simplifying code in RoughKernel methods
 #-------------------------------------------------------------------------------
 
@@ -151,13 +167,10 @@ def eval_adj(phi, psi, x, y):
 
 def add_tensor_scalar(a, s): 
     '''
-    Given a tensor (a_1, a_2, a_3, ...) and a scalar (s) returns
-    (a_1 + s, a_2, a_3, ...)
+    Given a batch of size B containing tensors (a_1, a_2, a_3, ...) and a scalar (s) returns a
+    batch of modified tensors like (a_1 + s, a_2, a_3, ...) 
     '''
-    #result = _algebra_scalar_multiply(identity_like(a), s)
-    #return result
-    result = a.data
-    result = result.at[0, 0].set(0)
+    result = a.data.at[:, 0].add(s)
     return rpj.FreeTensor(result, a.basis)
 
 # creates a symmetric BxB matrix from a length B*(B+1)/2 array
