@@ -5,7 +5,7 @@ from roughpy_jax.streams import LieIncrementStream
 from roughpy_jax.algebra import  as_free_tensor
 from functools import partial
 from jax.tree_util import tree_map
-from RoughKernel.utils import (ft_pairs, 
+from .utils import (ft_pairs, 
                    sigs_over_intervals, 
                    upper_tri_to_symmetric, 
                    eval_adj, 
