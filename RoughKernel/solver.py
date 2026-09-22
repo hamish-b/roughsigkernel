@@ -1,18 +1,14 @@
 import jax.numpy as jnp
 import roughpy_jax as rpj
 import jax
-from roughpy_jax.streams import LieIncrementStream
 from roughpy_jax.algebra import  as_free_tensor
 from functools import partial
-from jax.tree_util import tree_map
 from .utils import (ft_pairs, 
                    sigs_over_intervals, 
                    upper_tri_to_symmetric, 
                    eval_adj, 
                    add_tensor_scalar,
                    get, get_, set_,
-                   ft_pairs_mod,
-                   sigs_over_intervals_mod
                    )
 
 
@@ -22,80 +18,20 @@ class RoughKernel:
     kernel PDE paper) for a batch of paths.
     """
 
-    def __init__(self, n, R, W):
+    def __init__(self, n):
         """
         n - truncation depth for the log-signature / signature
-        R - resolution used when building the Lie increment stream
-        W - width (dimension of vector space path takes values in)
         """
         self.n = n
-        self.R = R
-        self.W = W
 
-    # ------------------------------------------------------------------
-    # Setup: building the Lie increment stream depends on self.n / self.R,
-    # so this is an instance method.
-    # ------------------------------------------------------------------
-    def make_Lie(self, data, times):
-        Lie_Basis = rpj.LieBasis(depth=self.n, width=self.W)
-        data_Lie = LieIncrementStream.from_increments(
-            timestamps=times,
-            data=data,
-            input_data_basis=None,
-            resolution=self.R,
-            lie_basis=Lie_Basis
-        )
-        return data_Lie
-
-    @staticmethod
-    def initialise_PDE(X_SPTs_zero, Y_SPTs_zero, tensor_basis):
-        '''
-        Inputs:
-        X_SPTs_zero - a length L tuple of FreeTensors of shape (M, D(n, W)) where M = M*(B+1)/2
-        where B is the batch size and D(n, W) is the dimension of the tensor basis with respect to
-        depth n and width W. Each of these tensors are the truncated (to n-1) signatures over
-        each interval in the partition with the additional change that the initial '1' in each
-        signature is changed to a '0'.
-
-        Y_SPTs_zero - sim.
-
-        tensor_basis - Tensor basis parameterised by n and W.
-
-        Outputs:
-        phi - (L+1) by (L+1) list of tensors each with batch size M
-        psi - as above
-        K - (L+1, L+1, M) shaped jnp array which gives the initial conditions for each pairwise kernel
-        function (the M necessary to represent each pair)
-        '''
-        L = len(X_SPTs_zero)
-        M, _ = X_SPTs_zero[0].shape # M is the no. of pairs
-
-        K = jnp.zeros((L + 1, L + 1, M), dtype=jnp.float32) # change second L to N (different partition for Y)??
-        # Since the paper gives K[0, v] as the inner product of Z_0^x and Z_v^y (and analogously
-        # for K[u, 0]), we assume Z_0^x = 1 = Z_0^y where 1 = (1, 0, 0, ...) in the signature sense
-        K = K.at[0, :, :].set(1)
-        K = K.at[:, 0, :].set(1)
-
-        zero_tensor = rpj.FreeTensor.zero(basis=tensor_basis, batch_dims=(M,))
-        phi = [[zero_tensor for _ in range(L + 1)] for _ in range(L + 1)] # again can change second L to N as there is no reason these need be the same
-        psi = [[zero_tensor for _ in range(L + 1)] for _ in range(L + 1)]
-
-        for i in range(1, L + 1):
-            phi[i][0] = X_SPTs_zero[i - 1]
-        for j in range(1, L + 1):
-            psi[0][j] = Y_SPTs_zero[j - 1] # change L to N (N=len(Y))
-
-        phi = rpj.FreeTensor(phi, tensor_basis)
-        psi = rpj.FreeTensor(psi, tensor_basis)
-
-        return phi, psi, K
-    
-    # try jax.jit on this after making sure it works
     @staticmethod
     @jax.jit
-    def initialise_PDE_mod(X_SPTs_zero, Y_SPTs_zero, tensor_basis):
+    def initialise_PDE(X_SPTs_zero, Y_SPTs_zero, tensor_basis):
 
         L, M, _ = X_SPTs_zero.shape # L is no. of intervals, M is the no. of pairs
+                                    # we assume L is the same for both X and Y. It would not be
+                                    # too difficult to edit this code to allow for distinct
+                                    # L_X and L_Y
 
         K = jnp.zeros((L + 1, L + 1, M), dtype=jnp.float32) 
         K = K.at[0, :, :].set(1)
@@ -156,7 +92,7 @@ class RoughKernel:
 #-------------------------------------------------------------
 
     @partial(jax.jit, static_argnums=(0, 4))
-    def partition_compute_mod(self, phi, psi, K, L, xlsps, ylsps, xlspts, ylspts):
+    def partition_compute(self, phi, psi, K, L, xlsps, ylsps, xlspts, ylspts):
 
         def outer_body(i, carry):
             phi, psi, K = carry
@@ -190,17 +126,12 @@ class RoughKernel:
     # it's an instance method.
     # ------------------------------------------------------------------
     
-    def solve_PDE(self, intervals, X, Y, is_Lie, times_X = None, times_Y = None, pair_batch_size=4096):
+    def solve_PDE(self, intervals, X, Y, pair_batch_size=4096):
 
-        L = len(intervals) # L = len(intervals_X), N = len(intervals_Y)
+        L = len(intervals) 
 
-        if is_Lie:
-            X_Lie, Y_Lie, Tensor_Basis = X, Y, X.group_basis
-            B1, B2 = X.batch_dims[0], Y.batch_dims[0]
-        else:
-            X_Lie, Y_Lie = self.make_Lie(X, times_X), self.make_Lie(Y, times_Y)
-            B1, B2 = len(X), len(Y)
-            Tensor_Basis = X_Lie.group_basis
+        X_LIS, Y_LIS, Tensor_Basis = X, Y, X.group_basis
+        B1, B2 = X.batch_dims[0], Y.batch_dims[0]
 
         # list containing every pair (x_i, y_j) s.t. x in X, y in Y. if X = Y, only need B*(B+1)/2
         if X == Y:
@@ -210,8 +141,8 @@ class RoughKernel:
             pairs = jnp.array([(i, j) for i in range(B1) for j in range(B2)])
             same = False
 
-        X_LSPs, X_LSPTs, X_SPTs_zero = sigs_over_intervals(X_Lie, intervals, self.n)
-        Y_LSPs, Y_LSPTs, Y_SPTs_zero = sigs_over_intervals(Y_Lie, intervals, self.n)
+        X_LSPs, X_LSPTs, X_SPTs_zero = sigs_over_intervals(X_LIS, intervals, self.n)
+        Y_LSPs, Y_LSPTs, Y_SPTs_zero = sigs_over_intervals(Y_LIS, intervals, self.n)
 
         results = []
 
@@ -220,26 +151,12 @@ class RoughKernel:
 
             pair_batch = pairs[start:start + pair_batch_size]
 
-            xspts_zero = ft_pairs(
-                X_SPTs_zero, pair_batch, 0, Tensor_Basis
-            )
-            yspts_zero = ft_pairs(
-                Y_SPTs_zero, pair_batch, 1, Tensor_Basis
-            )
-
-            xlsps = ft_pairs(
-                X_LSPs, pair_batch, 0, Tensor_Basis
-            )
-            ylsps = ft_pairs(
-                Y_LSPs, pair_batch, 1, Tensor_Basis
-            )
-
-            xlspts = ft_pairs(
-                X_LSPTs, pair_batch, 0, Tensor_Basis
-            )
-            ylspts = ft_pairs(
-                Y_LSPTs, pair_batch, 1, Tensor_Basis
-            )
+            xspts_zero = ft_pairs(X_SPTs_zero, pair_batch, 0, Tensor_Basis)
+            yspts_zero = ft_pairs(Y_SPTs_zero, pair_batch, 1, Tensor_Basis)
+            xlsps = ft_pairs(X_LSPs, pair_batch, 0, Tensor_Basis)
+            ylsps = ft_pairs(Y_LSPs, pair_batch, 1, Tensor_Basis)
+            xlspts = ft_pairs(X_LSPTs, pair_batch, 0, Tensor_Basis)
+            ylspts = ft_pairs(Y_LSPTs, pair_batch, 1, Tensor_Basis)
 
             phi_init, psi_init, K_init = self.initialise_PDE(
                 X_SPTs_zero=xspts_zero,
@@ -247,80 +164,7 @@ class RoughKernel:
                 tensor_basis=Tensor_Basis,
             )
 
-            xlsps = rpj.FreeTensor(xlsps, Tensor_Basis)
-            xlspts = rpj.FreeTensor(xlspts, Tensor_Basis)
-            ylsps = rpj.FreeTensor(ylsps, Tensor_Basis)
-            ylspts = rpj.FreeTensor(ylspts, Tensor_Basis)
-
-            K = self.partition_compute_mod(
-                phi=phi_init,
-                psi=psi_init,
-                K=K_init,
-                L=L,
-                xlsps=xlsps,
-                ylsps=ylsps,
-                xlspts=xlspts,
-                ylspts=ylspts,
-            )
-
-            results.append(K[-1, -1])
-
-        # Combine all pair results
-        K_final = jnp.concatenate(results, axis=0)
-
-        if same:
-            Gram = upper_tri_to_symmetric(
-                K_final, pairs, B1
-            )
-        else:
-            Gram = K_final.reshape(B1, B2)
-
-        return Gram
-
-    def solve_PDE_mod(self, intervals, X, Y, is_LIS, times_X = None, times_Y = None, pair_batch_size=4096):
-
-        L = len(intervals) 
-
-        if is_LIS:
-            X_LIS, Y_LIS, Tensor_Basis = X, Y, X.group_basis
-            B1, B2 = X.batch_dims[0], Y.batch_dims[0]
-        else:
-            X_LIS, Y_LIS = self.make_Lie(X, times_X), self.make_Lie(Y, times_Y)
-            B1, B2 = len(X), len(Y)
-            Tensor_Basis = X_LIS.group_basis
-
-        # list containing every pair (x_i, y_j) s.t. x in X, y in Y. if X = Y, only need B*(B+1)/2
-        if X == Y:
-            pairs = jnp.stack(jnp.triu_indices(B1), axis=1)
-            same = True
-        else:
-            pairs = jnp.array([(i, j) for i in range(B1) for j in range(B2)])
-            same = False
-
-        X_LSPs, X_LSPTs, X_SPTs_zero = sigs_over_intervals_mod(X_LIS, intervals, self.n)
-        Y_LSPs, Y_LSPTs, Y_SPTs_zero = sigs_over_intervals_mod(Y_LIS, intervals, self.n)
-
-        results = []
-
-        # Process P pairs at a time
-        for start in range(0, len(pairs), pair_batch_size):
-
-            pair_batch = pairs[start:start + pair_batch_size]
-
-            xspts_zero = ft_pairs_mod(X_SPTs_zero, pair_batch, 0, Tensor_Basis)
-            yspts_zero = ft_pairs_mod(Y_SPTs_zero, pair_batch, 1, Tensor_Basis)
-            xlsps = ft_pairs_mod(X_LSPs, pair_batch, 0, Tensor_Basis)
-            ylsps = ft_pairs_mod(Y_LSPs, pair_batch, 1, Tensor_Basis)
-            xlspts = ft_pairs_mod(X_LSPTs, pair_batch, 0, Tensor_Basis)
-            ylspts = ft_pairs_mod(Y_LSPTs, pair_batch, 1, Tensor_Basis)
-
-            phi_init, psi_init, K_init = self.initialise_PDE_mod(
-                X_SPTs_zero=xspts_zero,
-                Y_SPTs_zero=yspts_zero,
-                tensor_basis=Tensor_Basis,
-            )
-
-            K = self.partition_compute_mod(
+            K = self.partition_compute(
                 phi=phi_init,
                 psi=psi_init,
                 K=K_init,

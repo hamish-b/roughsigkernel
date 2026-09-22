@@ -45,7 +45,7 @@ def to_list_format(times, data):
     data_list = [data[b] for b in range(data.shape[0])]
     return times_list, data_list
 
-def make_Lie(times, data, n, W, R, incremental = False, input_basis = None):
+def make_LIS(times, data, n, W, R, incremental = False, input_basis = None):
     """
     Converts time-series data into a LieIncrementStream object
 
@@ -92,10 +92,10 @@ def uniform_intervals(interval_count):
     partition = Partition(endpoints, IntervalType.ClOpen)
     return partition.to_intervals()
 
-def trunc_mod(batch_tensor, old_depth, new_depth):
+def trunc(batch_tensor, old_depth, new_depth):
     return batch_tensor.change_depth(new_depth).change_depth(old_depth)
 
-def sigs_over_intervals_mod(X_LIS, intervals, n):
+def sigs_over_intervals(X_LIS, intervals, n):
     '''
     calculates log sigs, truncated log-sigs, and signature (with zero instead of 1 in first element)
     over each interval in intervals. Outputs three tuples of length len(intervals).
@@ -104,42 +104,14 @@ def sigs_over_intervals_mod(X_LIS, intervals, n):
     X_LSP_tuple = tuple(lie_to_tensor(X_LIS.log_signature(interval)) for interval in intervals)
     X_LSPs = rpj.FreeTensor(X_LSP_tuple, X_LSP_tuple[0].basis)
     X_SPs = rpj.ft_exp(X_LSPs, out_basis=X_LSPs.basis)
-    X_LSPTs = trunc_mod(X_LSPs, n, n-1)
-    X_SPTs = trunc_mod(X_SPs, n, n-1)
+    X_LSPTs = trunc(X_LSPs, n, n-1)
+    X_SPTs = trunc(X_SPs, n, n-1)
     X_SPTs_zero = _remove_unit_term(X_SPTs)
 
     return X_LSPs, X_LSPTs, X_SPTs_zero
 
-def ft_pairs_mod(batch_tensor, pairs, order, tensor_basis):
+def ft_pairs(batch_tensor, pairs, order, tensor_basis):
     return rpj.FreeTensor(batch_tensor.data[:, pairs[:, order], :], tensor_basis)
-
-def trunc(X_LSP, old_depth, new_depth):
-    """
-    Truncates from old_depth to new_depth, padding the difference with zeroes  
-    which allows for calculations with original depth tensors.
-    """
-    return tuple(x.change_depth(new_depth).change_depth(old_depth) for x in X_LSP)
-
-def ft_pairs(tuple_of_arrays, pairs, order, tensor_basis):
-    '''
-    helper function which changes the batch size of each tensor in the input so that there are
-    len(pairs[:, order]) elements in each batch (in this case representing the the first or second 
-    elements out of the B*(B+1)/2 pairs)
-    '''
-    return tuple(rpj.FreeTensor(jnp.asarray(array)[pairs[:, order]], tensor_basis) for array in tuple_of_arrays) 
-
-
-def sigs_over_intervals(X_Lie, intervals, n):
-    '''
-    calculates log sigs, truncated log-sigs, and signature (with zero instead of 1 in first element)
-    over each interval in intervals. Outputs three tuples of length len(intervals).
-    '''
-    X_LSPs = tuple(lie_to_tensor(X_Lie.log_signature(interval)) for interval in intervals)
-    X_SPs = tuple(rpj.ft_exp(x_ls, out_basis=x_ls.basis) for x_ls in X_LSPs)
-    X_LSPTs = trunc(X_LSPs, n, n-1)
-    X_SPTs = trunc(X_SPs, n, n-1)
-    X_SPTs_zero = tuple(_remove_unit_term(x) for x in X_SPTs)
-    return X_LSPs, X_LSPTs, X_SPTs_zero
 
 #-------------------------------------------------------------------------------
 # Helper functions for updating jnp arrays
