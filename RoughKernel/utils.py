@@ -98,7 +98,7 @@ def trunc(batch_tensor, old_depth, new_depth):
 def sigs_over_intervals(X_LIS, intervals, n):
     '''
     calculates log sigs, truncated log-sigs, and signature (with zero instead of 1 in first element)
-    over each interval in intervals. Outputs three tuples of length len(intervals).
+    over each interval in intervals. Outputs three tensors of shape (L, B, T(n, W)).
     '''
 
     X_LSP_tuple = tuple(lie_to_tensor(X_LIS.log_signature(interval)) for interval in intervals)

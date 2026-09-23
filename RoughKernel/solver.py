@@ -14,7 +14,7 @@ from .utils import (ft_pairs,
 
 class RoughKernel:
     """
-    Solves the signature kernel PDE (Algorithm 5.1 in the rough signature
+    Class that solves the rough signature kernel PDE (Algorithm 5.1 in the rough signature
     kernel PDE paper) for a batch of paths.
     """
 
@@ -27,7 +27,9 @@ class RoughKernel:
     @staticmethod
     @jax.jit
     def initialise_PDE(X_SPTs_zero, Y_SPTs_zero, tensor_basis):
-
+        '''
+        Sets up the initial conditions for the PDE (as in Algorithm 5.1)
+        '''
         L, M, _ = X_SPTs_zero.shape # L is no. of intervals, M is the no. of pairs
                                     # we assume L is the same for both X and Y. It would not be
                                     # too difficult to edit this code to allow for distinct
@@ -71,6 +73,9 @@ class RoughKernel:
     @staticmethod
     @jax.jit
     def compute_K(xi, yj, phi00, phi01, phi10, phi11, psi00, psi01, psi10, psi11, K00, K01, K10):
+        
+        # Note that in algorithm 5.1, K is written as f
+
         eval_adj_ = eval_adj(phi00, psi00, xi, yj)
         next_eval_adj = eval_adj(phi11, psi11, xi, yj)
         temp_2 = eval_adj(phi01, psi01, xi, yj)
@@ -122,8 +127,7 @@ class RoughKernel:
         return K   
 
     # ------------------------------------------------------------------
-    # Top-level driver: depends on self.n / self.R (via make_Lie), so
-    # it's an instance method.
+    # Computes the Gram matrix by solving the PDE for every pair 
     # ------------------------------------------------------------------
     
     def solve_PDE(self, intervals, X, Y, pair_batch_size=4096):
